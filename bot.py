@@ -192,10 +192,40 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     active = chat_id not in _disabled_chats
     await update.message.reply_text(
         f"{'🟢 Active' if active else '🔴 Paused'}\n"
+        f"MY→EN: on\n"
         f"EN→MY: {'on' if ENABLE_ENGLISH_TO_BURMESE else 'off'}\n"
         f"Min length: {MIN_MESSAGE_LENGTH}\n"
-        f"Cooldown: {COOLDOWN_SECONDS}s"
+        f"Cooldown: {COOLDOWN_SECONDS}s\n\n"
+        f"Use /test to verify the translation API is working."
     )
+
+
+async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Test both translation directions and report results."""
+    await update.message.reply_text("🔄 Testing translation API…")
+
+    results = []
+
+    # Test MY → EN
+    sample_my = "မင်္ဂလာပါ"
+    translated_en = translate_text(sample_my, "en")
+    if translated_en:
+        results.append(f"✅ MY→EN: '{sample_my}' → '{translated_en}'")
+    else:
+        results.append("❌ MY→EN: FAILED — check Google credentials in Railway")
+
+    # Test EN → MY
+    if ENABLE_ENGLISH_TO_BURMESE:
+        sample_en = "Hello"
+        translated_my = translate_text(sample_en, "my")
+        if translated_my:
+            results.append(f"✅ EN→MY: '{sample_en}' → '{translated_my}'")
+        else:
+            results.append("❌ EN→MY: FAILED — check Google credentials in Railway")
+    else:
+        results.append("⚠️ EN→MY: disabled (set ENABLE_EN_TO_MY=true in Railway to enable)")
+
+    await update.message.reply_text("\n".join(results))
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -241,7 +271,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     translated = translate_text(text, target)
-    if translated and translated.strip().lower() != text.strip().lower():
+    if translated is None:
+        logger.error("Translation returned None for chat %s, target=%s", chat_id, target)
+        await message.reply_text("⚠️ Translation failed — check Railway logs and Google credentials.")
+        return
+
+    if translated.strip().lower() != text.strip().lower():
         reply = f"{flag} {translated}"
         await message.reply_text(reply)
         logger.info(
@@ -251,6 +286,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             chat_id,
             len(text),
         )
+    else:
+        logger.debug("Translation identical to source for chat %s — skipping reply.", chat_id)
 
 
 # ---------------------------------------------------------------------------
@@ -267,6 +304,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("test", cmd_test))
 
     # Register message handler (text only, groups + private)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
@@ -278,6 +316,7 @@ def main() -> None:
                 BotCommand("start", "Enable translation"),
                 BotCommand("stop", "Pause translation"),
                 BotCommand("status", "Show bot status"),
+                BotCommand("test", "Test translation API"),
             ]
         )
 
