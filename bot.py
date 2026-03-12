@@ -1,7 +1,7 @@
 """
 Burmese-English Telegram Translator Bot
 Automatically translates Burmese↔English in group chats.
-Uses Google Cloud Translation API v3.
+Primary: OpenAI GPT-4o-mini. Fallback: Google Cloud Translation API.
 """
 
 import os
@@ -10,6 +10,7 @@ import logging
 import html
 from typing import Optional
 
+import openai
 from telegram import Update, BotCommand
 from telegram.ext import (
     Application,
@@ -18,7 +19,6 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from google.cloud import translate_v2 as translate
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -40,18 +40,67 @@ logging.basicConfig(
 logger = logging.getLogger("translator_bot")
 
 # ---------------------------------------------------------------------------
-# Google Cloud Translation client (lazy init)
+# OpenAI client (primary translator)
 # ---------------------------------------------------------------------------
 
-_translate_client: Optional[translate.Client] = None
+_openai_client: Optional[openai.OpenAI] = None
 
 
-def get_translate_client() -> translate.Client:
-    """Return a cached Google Translate client."""
+def get_openai_client() -> openai.OpenAI:
+    """Return a cached OpenAI client."""
+    global _openai_client
+    if _openai_client is None:
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY env var is not set")
+        _openai_client = openai.OpenAI(api_key=api_key)
+        logger.info("OpenAI client initialised.")
+    return _openai_client
+
+
+def translate_with_openai(text: str, target_lang: str) -> Optional[str]:
+    """Translate using OpenAI GPT-4o-mini. Returns None on failure."""
+    lang_name = "English" if target_lang == "en" else "Burmese"
+    try:
+        client = get_openai_client()
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        f"Translate the user's message to {lang_name}. "
+                        "Return only the translated text, nothing else."
+                    ),
+                },
+                {"role": "user", "content": text},
+            ],
+            max_tokens=1000,
+            temperature=0,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception:
+        logger.exception("OpenAI translation failed for target=%s", target_lang)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Google Cloud Translation client (fallback)
+# ---------------------------------------------------------------------------
+
+try:
+    from google.cloud import translate_v2 as _gcloud_translate
+    _GCLOUD_AVAILABLE = True
+except ImportError:
+    _GCLOUD_AVAILABLE = False
+
+_translate_client = None
+
+
+def get_translate_client():
+    """Return a cached Google Cloud Translate client."""
     global _translate_client
     if _translate_client is None:
-        # If credentials are supplied as a JSON string (common on Railway),
-        # write them to a temp file and point the env var there.
         creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
         if creds_json and not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
             creds_path = "/tmp/gcloud_creds.json"
@@ -59,10 +108,22 @@ def get_translate_client() -> translate.Client:
                 f.write(creds_json)
             os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = creds_path
             logger.info("Wrote Google credentials to %s", creds_path)
-
-        _translate_client = translate.Client()
-        logger.info("Google Translate client initialised.")
+        _translate_client = _gcloud_translate.Client()
+        logger.info("Google Cloud Translate client initialised.")
     return _translate_client
+
+
+def translate_with_google(text: str, target_lang: str) -> Optional[str]:
+    """Translate using Google Cloud Translation. Returns None on failure."""
+    if not _GCLOUD_AVAILABLE:
+        return None
+    try:
+        client = get_translate_client()
+        result = client.translate(text, target_language=target_lang)
+        return html.unescape(result["translatedText"])
+    except Exception:
+        logger.exception("Google Cloud translation failed for target=%s", target_lang)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -147,19 +208,23 @@ def _check_cooldown(chat_id: int) -> bool:
 
 def translate_text(text: str, target_lang: str) -> Optional[str]:
     """
-    Translate *text* to *target_lang* using Google Cloud Translation.
-    Returns the translated string, or None on failure.
+    Translate *text* to *target_lang*.
+    Tries OpenAI first; falls back to Google Cloud Translation on failure.
+    Returns the translated string, or None if both fail.
     """
-    try:
-        client = get_translate_client()
-        result = client.translate(text, target_language=target_lang)
-        translated = result["translatedText"]
-        # Google sometimes returns HTML-escaped entities
-        translated = html.unescape(translated)
-        return translated
-    except Exception:
-        logger.exception("Translation failed for target=%s", target_lang)
-        return None
+    result = translate_with_openai(text, target_lang)
+    if result:
+        logger.debug("Translation via OpenAI [target=%s]", target_lang)
+        return result
+
+    logger.warning("OpenAI failed, falling back to Google Cloud Translate [target=%s]", target_lang)
+    result = translate_with_google(text, target_lang)
+    if result:
+        logger.info("Translation via Google Cloud fallback [target=%s]", target_lang)
+        return result
+
+    logger.error("Both translation providers failed [target=%s]", target_lang)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -208,20 +273,28 @@ async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # Test MY → EN
     sample_my = "မင်္ဂလာပါ"
-    translated_en = translate_text(sample_my, "en")
-    if translated_en:
-        results.append(f"✅ MY→EN: '{sample_my}' → '{translated_en}'")
+    openai_en = translate_with_openai(sample_my, "en")
+    if openai_en:
+        results.append(f"✅ OpenAI MY→EN: '{sample_my}' → '{openai_en}'")
     else:
-        results.append("❌ MY→EN: FAILED — check Google credentials in Railway")
+        google_en = translate_with_google(sample_my, "en")
+        if google_en:
+            results.append(f"⚠️ OpenAI failed, Google MY→EN: '{sample_my}' → '{google_en}'")
+        else:
+            results.append("❌ MY→EN: BOTH providers FAILED — check OPENAI_API_KEY and Google credentials")
 
     # Test EN → MY
     if ENABLE_ENGLISH_TO_BURMESE:
         sample_en = "Hello"
-        translated_my = translate_text(sample_en, "my")
-        if translated_my:
-            results.append(f"✅ EN→MY: '{sample_en}' → '{translated_my}'")
+        openai_my = translate_with_openai(sample_en, "my")
+        if openai_my:
+            results.append(f"✅ OpenAI EN→MY: '{sample_en}' → '{openai_my}'")
         else:
-            results.append("❌ EN→MY: FAILED — check Google credentials in Railway")
+            google_my = translate_with_google(sample_en, "my")
+            if google_my:
+                results.append(f"⚠️ OpenAI failed, Google EN→MY: '{sample_en}' → '{google_my}'")
+            else:
+                results.append("❌ EN→MY: BOTH providers FAILED — check OPENAI_API_KEY and Google credentials")
     else:
         results.append("⚠️ EN→MY: disabled (set ENABLE_EN_TO_MY=true in Railway to enable)")
 
