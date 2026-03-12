@@ -75,8 +75,7 @@ def translate_with_openai(text: str, target_lang: str) -> tuple[Optional[str], O
                 },
                 {"role": "user", "content": text},
             ],
-            max_tokens=1000,
-            temperature=0,
+            max_completion_tokens=1000,
         )
         return response.choices[0].message.content.strip(), None
     except Exception as e:
