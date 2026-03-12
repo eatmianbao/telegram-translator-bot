@@ -64,7 +64,7 @@ def translate_with_openai(text: str, target_lang: str) -> tuple[Optional[str], O
     try:
         client = get_openai_client()
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-5.1",
             messages=[
                 {
                     "role": "system",
