@@ -58,8 +58,8 @@ def get_openai_client() -> openai.OpenAI:
     return _openai_client
 
 
-def translate_with_openai(text: str, target_lang: str) -> Optional[str]:
-    """Translate using OpenAI GPT-4o-mini. Returns None on failure."""
+def translate_with_openai(text: str, target_lang: str) -> tuple[Optional[str], Optional[str]]:
+    """Translate using OpenAI GPT-4o-mini. Returns (result, error_message)."""
     lang_name = "English" if target_lang == "en" else "Burmese"
     try:
         client = get_openai_client()
@@ -78,10 +78,10 @@ def translate_with_openai(text: str, target_lang: str) -> Optional[str]:
             max_tokens=1000,
             temperature=0,
         )
-        return response.choices[0].message.content.strip()
-    except Exception:
+        return response.choices[0].message.content.strip(), None
+    except Exception as e:
         logger.exception("OpenAI translation failed for target=%s", target_lang)
-        return None
+        return None, str(e)
 
 
 # ---------------------------------------------------------------------------
@@ -212,12 +212,12 @@ def translate_text(text: str, target_lang: str) -> Optional[str]:
     Tries OpenAI first; falls back to Google Cloud Translation on failure.
     Returns the translated string, or None if both fail.
     """
-    result = translate_with_openai(text, target_lang)
+    result, err = translate_with_openai(text, target_lang)
     if result:
         logger.debug("Translation via OpenAI [target=%s]", target_lang)
         return result
 
-    logger.warning("OpenAI failed, falling back to Google Cloud Translate [target=%s]", target_lang)
+    logger.warning("OpenAI failed (%s), falling back to Google Cloud Translate [target=%s]", err, target_lang)
     result = translate_with_google(text, target_lang)
     if result:
         logger.info("Translation via Google Cloud fallback [target=%s]", target_lang)
@@ -273,28 +273,30 @@ async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # Test MY → EN
     sample_my = "မင်္ဂလာပါ"
-    openai_en = translate_with_openai(sample_my, "en")
+    openai_en, openai_err = translate_with_openai(sample_my, "en")
     if openai_en:
         results.append(f"✅ OpenAI MY→EN: '{sample_my}' → '{openai_en}'")
     else:
+        results.append(f"❌ OpenAI MY→EN failed: {openai_err}")
         google_en = translate_with_google(sample_my, "en")
         if google_en:
-            results.append(f"⚠️ OpenAI failed, Google MY→EN: '{sample_my}' → '{google_en}'")
+            results.append(f"✅ Google fallback MY→EN: '{sample_my}' → '{google_en}'")
         else:
-            results.append("❌ MY→EN: BOTH providers FAILED — check OPENAI_API_KEY and Google credentials")
+            results.append("❌ Google fallback MY→EN also failed — check GOOGLE_CREDENTIALS_JSON")
 
     # Test EN → MY
     if ENABLE_ENGLISH_TO_BURMESE:
         sample_en = "Hello"
-        openai_my = translate_with_openai(sample_en, "my")
+        openai_my, openai_err2 = translate_with_openai(sample_en, "my")
         if openai_my:
             results.append(f"✅ OpenAI EN→MY: '{sample_en}' → '{openai_my}'")
         else:
+            results.append(f"❌ OpenAI EN→MY failed: {openai_err2}")
             google_my = translate_with_google(sample_en, "my")
             if google_my:
-                results.append(f"⚠️ OpenAI failed, Google EN→MY: '{sample_en}' → '{google_my}'")
+                results.append(f"✅ Google fallback EN→MY: '{sample_en}' → '{google_my}'")
             else:
-                results.append("❌ EN→MY: BOTH providers FAILED — check OPENAI_API_KEY and Google credentials")
+                results.append("❌ Google fallback EN→MY also failed — check GOOGLE_CREDENTIALS_JSON")
     else:
         results.append("⚠️ EN→MY: disabled (set ENABLE_EN_TO_MY=true in Railway to enable)")
 
